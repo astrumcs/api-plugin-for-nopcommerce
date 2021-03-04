@@ -31,6 +31,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using Nop.Core.Domain.Shipping;
+using Nop.Plugin.Api.DTOs.Shipments;
 using static Nop.Plugin.Api.Infrastructure.Constants;
 
 namespace Nop.Plugin.Api.Controllers
@@ -42,6 +44,7 @@ namespace Nop.Plugin.Api.Controllers
         private readonly IProductService _productService;
         private readonly IOrderProcessingService _orderProcessingService;
         private readonly IOrderService _orderService;
+        private readonly IShipmentService _shipmentService;
         private readonly IShoppingCartService _shoppingCartService;
         private readonly IGenericAttributeService _genericAttributeService;
         private readonly IShippingService _shippingService;
@@ -69,6 +72,7 @@ namespace Nop.Plugin.Api.Controllers
             IFactory<Order> factory,
             IOrderProcessingService orderProcessingService,
             IOrderService orderService,
+            IShipmentService shipmentService,
             IShoppingCartService shoppingCartService,
             IGenericAttributeService genericAttributeService,
             IStoreContext storeContext,
@@ -83,6 +87,7 @@ namespace Nop.Plugin.Api.Controllers
             _factory = factory;
             _orderProcessingService = orderProcessingService;
             _orderService = orderService;
+            _shipmentService = shipmentService;
             _shoppingCartService = shoppingCartService;
             _genericAttributeService = genericAttributeService;
             _storeContext = storeContext;
@@ -430,7 +435,124 @@ namespace Nop.Plugin.Api.Controllers
             return new RawJsonActionResult(json);
         }
 
-        private bool SetShippingOption(string shippingRateComputationMethodSystemName, 
+
+    [HttpPost]
+    [Route("/api/orders/shipcomplete")]
+    [ProducesResponseType(typeof(OrdersRootObject), (int)HttpStatusCode.OK)]
+    [ProducesResponseType(typeof(string), (int)HttpStatusCode.Unauthorized)]
+    [ProducesResponseType(typeof(ErrorsRootObject), (int)HttpStatusCode.BadRequest)]
+    [ProducesResponseType(typeof(string), (int)HttpStatusCode.NotFound)]
+    [ProducesResponseType(typeof(ErrorsRootObject), 422)]
+    public IActionResult ShipComplete([ModelBinder(typeof(JsonModelBinder<ShipCompleteDto>))] Delta<ShipCompleteDto> shipmentDelta)
+    {
+      // This method will create a shipment record that assumes that all items in the order were
+      // shipped in one package. 
+
+      // Basic steps:
+      // * Make sure that we don't already have a shipment record. 
+      // * Get the order and the items
+      // * Build the shipment
+      // * Save it and return a success
+
+
+      // What we probably need to process this:
+      // Order ID
+      // Tracking Number
+      // Admin Comment
+
+      // Display the errors if the validation has failed at some point.
+      if (!ModelState.IsValid)
+      {
+        return Error();
+      }
+
+      var dto = shipmentDelta.Dto;
+
+      //try to get an order with the specified id
+      var order = _orderService.GetOrderByCustomOrderNumber(dto.OrderReference);
+      if (order == null)
+        return Error(HttpStatusCode.NotFound, "error", "not found");
+
+      // Check to see if we already have a shipment for this order. 
+      if (_shipmentService.GetShipmentsByOrderId(order.Id).Any())
+        return Error(HttpStatusCode.Conflict, "error", "Order already has shipments");
+
+      // Get the shipment record spun up.
+      var trackingNumber = dto.TrackingNumber ?? "";
+      var adminComment = dto.AdminComment ?? "";
+      var shipment = new Shipment
+      {
+        OrderId = order.Id,
+        TrackingNumber = trackingNumber,
+        TotalWeight = null,
+        ShippedDateUtc = null,
+        DeliveryDateUtc = null,
+        AdminComment = adminComment,
+        CreatedOnUtc = DateTime.UtcNow
+      };
+
+      _shipmentService.InsertShipment(shipment);
+
+      // Work through the items on the order. 
+      var orderItems = _orderService.GetOrderItems(order.Id, isShipEnabled: true);
+
+      decimal? totalWeight = null;
+      var itemCount = 0;
+      foreach (var orderItem in orderItems)
+      {
+        var orderItemTotalWeight = orderItem.ItemWeight * orderItem.Quantity;
+        if (orderItemTotalWeight.HasValue)
+        {
+          if (!totalWeight.HasValue)
+            totalWeight = 0;
+          totalWeight += orderItemTotalWeight.Value;
+        }
+
+        //create a shipment item
+        var shipmentItem = new ShipmentItem
+        {
+          OrderItemId = orderItem.Id,
+          Quantity = orderItem.Quantity,
+          WarehouseId = 0,
+          ShipmentId = shipment.Id
+        };
+
+        _shipmentService.InsertShipmentItem(shipmentItem);
+        itemCount++;
+      }
+
+      //if we have at least one item in the shipment, then save it
+      if (itemCount > 0)
+      {
+        shipment.TotalWeight = totalWeight;
+
+        // Also set the order as shipped
+        _orderProcessingService.Ship(shipment, true);  // This will notify the customer...
+
+        //add a note
+        _orderService.InsertOrderNote(new OrderNote
+        {
+          Note = "A shipment has been added and order set Complete via API",
+          DisplayToCustomer = false,
+          CreatedOnUtc = DateTime.UtcNow,
+          OrderId = order.Id
+        });
+        order.OrderStatus = OrderStatus.Complete;
+        _orderService.UpdateOrder(order);
+
+        // TODO Return the new shipment info.  Use the dto model stuff to send data back to the caller
+        var ret = new ShipCompleteReturnDto();
+        ret.ShipmentId = shipment.Id;
+
+        var json = JsonFieldsSerializer.Serialize(ret, string.Empty);
+
+        return new RawJsonActionResult(json);
+      }
+
+      return Error(errorMessage: "No Products Selected To Ship");
+    }
+
+    private bool SetShippingOption(string shippingRateComputationMethodSystemName, 
             string shippingOptionName, 
             int storeId,
             Customer customer, 

@@ -54,7 +54,8 @@ namespace Nop.Plugin.Api.Controllers
             IProductApiService productApiService,
             IPriceCalculationService priceCalculationService,
             ITaxService taxService,
-            IPictureService pictureService, IDTOHelper dtoHelper)
+            IPictureService pictureService, 
+            IDTOHelper dtoHelper)
             : base(jsonFieldsSerializer,
                 aclService,
                 customerService,
@@ -394,5 +395,5 @@ namespace Nop.Plugin.Api.Controllers
 
             return orderItem;
         }
-    }
+  }
 }
